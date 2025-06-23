@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# Testing
+.hypothesis/
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+.tox/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Project specific
+/data/*.db
+/tpmdata/
+*.log
+/dev/shm/
+
+# OS
+.DS_Store
+Thumbs.db

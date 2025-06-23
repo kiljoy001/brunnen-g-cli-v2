@@ -1,8 +1,7 @@
 import hashlib
 import os
 import random
-
-import pytest
+from pqcrypto.sign.ml_dsa_65 import generate_keypair, sign
 from hypothesis.strategies import SearchStrategy, binary, just, composite, integers
 from hypothesis import strategies as st
 from faker import Faker
@@ -120,3 +119,35 @@ def minor_byte_string_changes(draw, original_bytes_strategy: SearchStrategy[byte
         raise RuntimeError(f"Failed to generate modified data for type: {modification_type}")
 
     return modified_data_bytes
+
+
+@composite
+def merkle_proof_strategy(draw):
+    """Generate valid merkle proof as list of bytes"""
+    proof_length = draw(st.integers(min_value=1, max_value=20))
+    return [draw(generate_32_bytes()) for _ in range(proof_length)]
+
+
+@composite
+def dilithium_keypair_strategy(draw):
+    """Generate real Dilithium3 keypair"""
+    public_key, secret_key = generate_keypair()
+    return {'public_key': public_key, 'secret_key': secret_key}
+
+
+@composite
+def merkle_tree_data_strategy(draw):
+    """Generate consistent merkle tree data with real Dilithium signature"""
+    keypair = draw(dilithium_keypair_strategy())
+    dih = draw(generate_32_bytes())
+
+    # Sign the DIH with Dilithium
+    signature = sign(dih, keypair['secret_key'])
+
+    return {
+        'dih': dih,
+        'merkle_proof': draw(merkle_proof_strategy()),
+        'merkle_index': draw(st.integers(min_value=0, max_value=2 ** 16 - 1)),
+        'dilithium_signature': signature,
+        'dilithium_public_key': keypair['public_key']
+    }

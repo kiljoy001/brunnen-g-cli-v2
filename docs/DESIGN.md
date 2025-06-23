@@ -1,14 +1,27 @@
-# Brunnen-G Identity System Documentation
+# Brunnen-G Identity System Documentation v3.1
 
 ## Overview
 
-Brunnen-G implements a decentralized public key infrastructure using hardware security modules, blockchain persistence, and quantum-resistant cryptography. The system enables passwordless authentication without central authorities.
+Brunnen-G implements a decentralized public key infrastructure using hardware security modules, blockchain persistence, and certificate-based identity storage. The system enables passwordless authentication without central authorities or network dependencies.
 
 ## Core Identity Equation
 
-Each identity is computed as:
+Each identity is computed as a stable hash:
 ```
-identity = h(h(tpm_pubkey) || h(dilithium(h(emercoin_signature))) || tpm_nonce || h(yubikey))
+Let:
+ H(.) denote the SHA256 hash function
+ || denote the concatenation operator
+ TPMpk represents the TPM public key
+ DILsig represents the Dilithium signature of the Emercoin signed hash of TPMpk
+ YUBIpk represents the YubiKey public key in slot 9c (touch-only)
+
+First define the Domain Identity Hash (DIH):
+ DIH = H(TPMpk || H(DILsig))
+
+Then, the Stable Identity Hash (IDstable):
+ IDstable = H(DIH || H(YUBIpk))
+
+IDstable serves as the leaf in merkle trees, providing an unchanging identifier.
 ```
 
 ### Components
@@ -16,7 +29,7 @@ identity = h(h(tpm_pubkey) || h(dilithium(h(emercoin_signature))) || tpm_nonce |
 **TPM Public Key**
 - Hardware-generated key that never leaves the TPM
 - Provides root of trust anchored in silicon
-- Enables secure nonce generation for zero-knowledge proofs
+- Randomized handles prevent enumeration
 
 **Emercoin Domain Signature**
 - Proves domain ownership through blockchain
@@ -28,145 +41,76 @@ identity = h(h(tpm_pubkey) || h(dilithium(h(emercoin_signature))) || tpm_nonce |
 - Signs the Emercoin signature for quantum resistance
 - NIST-approved algorithm (FIPS 204)
 
-**TPM Nonce**
-- Fresh randomness for each authentication
-- Prevents replay attacks
-- Enables zero-knowledge property
-
 **YubiKey Component**
-- PIV certificate stored in slot 9a
-- Requires physical touch for operations
-- Acts as uncopyable bearer token
+- PIV slot 9c configured for touch-only (no PIN)
+- Certificate generated on-device with custom extensions
+- Physical touch required for all operations
+- Public key exportable for remote verification
+
+## Certificate-Based Architecture
+
+### Self-Contained Identity
+
+X.509 certificate structure:
+- **Subject**: user@domain.coin
+- **Extension OID 63716**: Merkle proof and metadata (JSON)
+  - merkle_proof: array of proof nodes
+  - merkle_index: leaf position
+  - dih: Domain Identity Hash
+  - domain_signature: Emercoin signature
+
+### Multi-Slot Device Identity
+Slots could be used to hold multiple idenities, typically for devices that the user may have using the yggdrasil public key as an identifier. An extension equation of IDstable = H(DIH || H(YUBIpk) || H(YggPubKey))
+- **Slot 9a**: Personal device identity
+- **Slot 9c**: Work device identity  
+- **Slot 9d**: Kiosk/shared device identity
+- **Slot 9e**: Service-specific identity
+
+Each slot binds a user to a specific device, enabling fine-grained access control.
 
 ## Registration Process
 
 ### Step 1: Identity Generation
-1. TPM generates keypair (stays in hardware)
-2. Domain owner signs TPM public key
+1. TPM generates keypair (randomized handle)
+2. Domain owner signs TPM public key with Emercoin key
 3. Dilithium signs the domain signature
-4. YubiKey generates certificate
+4. YubiKey generates touch-only key in slot 9c
 
-### Step 2: Database Aggregation
-1. Domain collects all identity records
-2. Computes merkle root of identity set
-3. Publishes database to IPFS
-4. Stores only reference on blockchain:
+### Step 2: Certificate Creation
+1. Compute IDstable for user
+2. Add user to domain's merkle tree
+3. Generate merkle proof for user
+4. YubiKey generates certificate with proof in extension
+5. Certificate remains on YubiKey
+
+### Step 3: Domain Publication
+1. Compute final merkle root
+2. Publish to blockchain:
    ```
    trust:domain.coin = {
-     "cid": "QmHash...",
-     "merkle_root": "0xabc123..."
+     "merkle_root": "0xabc123...",
+     "blockheight": 1234567890
    }
    ```
 
-**Limitation**: Individual identities are not stored on-chain to reduce costs. Users must trust IPFS availability or maintain local copies.
+## Authentication Flow
 
-## Verification Process
+### Touch-Only Authentication
+1. Verifier sends challenge nonce
+2. User signs challenge with YubiKey (touch required)
+3. Verifier validates signature with certificate public key
+4. Extract merkle proof from certificate extension
+5. Verify proof against blockchain merkle root
 
-### Fast Path (Bloom Filter)
-- O(1) lookup to check if identity might exist
-- Prevents expensive operations on invalid identities
-- Sub-microsecond response time
+This order prevents proof replay attacks by validating possession first.
 
-### Standard Path (Database)
-1. Fetch domain's database from IPFS
-2. Verify merkle root matches blockchain
-3. Query local database for identity
-4. Extract public keys and signatures
+### Cross-Domain Verification
 
-### Merkle Proof Path (Lightweight)
-1. User provides merkle proof with identity data
-2. Verify proof against blockchain merkle root
-3. No database download required
-4. Instant verification with minimal data
-
-### Authentication Flow
-1. Verifier generates random nonce via TPM
-2. Sends nonce challenge to user
-3. User signs (previous_hashes + nonce) with YubiKey
-4. Verifier checks signature against stored public key
-5. Physical touch required on YubiKey
-
-## Zero-Knowledge Properties
-
-**What the verifier learns:**
-- Identity exists and is valid
-- User currently possesses the hardware
-
-**What remains secret:**
-- All private keys
-- Internal computation methods
-- Hardware-specific details
-
-## Database Structure
-
-### Enhanced Schema with Merkle Proofs
-
-**address_keys table**
-```
-- identity_hash: Full computed identity hash
-- tpm_pubkey: TPM public key
-- dilithium_pubkey: Post-quantum public key
-- dilithium_sig: Domain signature
-- yubikey_cert: PIV certificate
-- merkle_proof: JSON array of proof nodes
-- merkle_index: Leaf position in tree
-```
-
-**db_root table**
-```
-- merkle_root: Current root hash
-- identity_count: Total identities
-- tree_height: Merkle tree depth
-- timestamp: Last update time
-```
-
-### User Experience Benefits
-
-With merkle proofs stored per user:
-- Offline verification using only proof + root
-- Mobile-friendly (no large DB downloads)
-- Instant identity verification
-- Privacy-preserving (don't reveal all users)
-
-Users can export their proof as QR code or file for truly portable identity verification.
-
-### Per-Identity Storage
-- Not stored individually on blockchain
-- Aggregated into domain databases
-- Merkle proofs enable membership verification
-
-### Domain-Level Operations
-- Batch identity updates daily/weekly
-- Single blockchain transaction per batch
-- IPFS distributes full database
-- Nodes cache frequently accessed domains
-
-### Cost Model
-- ~$0.01 per domain update (not per user)
-- Users prove membership via merkle proof
-- Database downloads amortized across queries
-
-## Security Properties
-
-**Hardware Binding**
-- Private keys physically locked in TPM/YubiKey
-- Cannot be extracted even with root access
-- Survives OS compromise
-
-**Quantum Resistance**
-- Dilithium signatures resist quantum attacks
-- Hash functions provide 256-bit quantum security
-- Forward-secure design
-
-**Physical Presence**
-- YubiKey touch prevents remote attacks
-- Rate-limited by human interaction
-- Visible security indicator
-
-**No Single Point of Failure**
-- Any node can verify identities
-- No central certificate authority
-- Blockchain provides persistence
+User alice@domain1.coin authenticates to domain2.coin:
+1. domain2.coin generates challenge
+2. alice signs with YubiKey from domain1.coin
+3. domain2.coin fetches trust:domain1.coin from blockchain
+4. Verifies alice's merkle proof against domain1's root
 
 ## Domain Certificate Authority
 
@@ -182,54 +126,111 @@ This enables:
 - Code signing
 - Email encryption
 
-## Network Integration
+## Data Layer (Prefix: 'risk:')
 
-**API Access**
-- REST endpoints for verification
-- HMAC-authenticated requests
-- Standard HTTP status codes (200/403)
+### Storage Tiers
+1. **CBOR on Blockchain** (<15KB)
+   - Direct storage with 'risk:' prefix
+   - Configuration, metadata, small files
+   - Example: `risk:domain.coin:config`
 
-**VoIP Support**
-- Identity-based dialing (user@domain.coin)
-- Asterisk AGI integration
-- SIP over Yggdrasil mesh
+2. **BitTorrent** (>15KB)
+   - Large databases, media files
+   - Blockchain stores torrent hash
+   - P2P distribution for scalability
 
-**PAM Module**
-- System login via Brunnen-G identity
-- Replaces passwords for SSH/sudo
-- Offline verification capability
+## API Design
 
-## Implementation Requirements
+### DDOS Protection
 
-**Hardware**
-- TPM 2.0 chip
-- YubiKey with PIV support
-- Standard x86/ARM processor
+Verify endpoints protected via:
+- Rate limiting per IP/identity
+- Proof-of-work challenges for anonymous access
+- YubiKey signature validation before expensive operations
+- Caching of recently verified identities
 
-**Software**
-- Emercoin blockchain node
-- IPFS daemon
-- Python 3.8+ runtime
-- tpm2-tools package
+### Core Endpoints
+```
+GET  /api/v1/health              - System status
+POST /api/v1/auth/challenge      - Get auth challenge
+POST /api/v1/auth/verify         - Verify signed challenge
+POST /api/v1/register            - Register new identity (authenticated)
+```
 
-**Network**
-- Internet connectivity for updates
-- Yggdrasil mesh (optional)
-- Local database cache
+## Security Properties
 
-## Operational Considerations
+**Hardware Binding**
+- Private keys physically locked in TPM/YubiKey
+- Touch requirement prevents automation
+- Survives OS compromise
 
-**Backup Strategy**
-- TPM handles are hardware-specific
-- YubiKey can be duplicated for redundancy
-- Blockchain provides automatic backup
+**Quantum Resistance**
+- Dilithium signatures resist quantum attacks
+- SHA256 provides 128-bit quantum security
+- Forward-secure design
 
-**Key Rotation**
-- Generate new identity components
-- Update blockchain record
-- Maintain old identity during transition
+**Physical Presence**
+- Every operation requires touch
+- No PIN reduces phishing surface
+- Rate-limited by human interaction
 
-**Monitoring**
-- Transaction logs for audit trail
-- Merkle root changes indicate updates
-- Domain expiration warnings
+**Offline Capability**
+- Certificate contains all verification data
+- Only blockchain root lookup required
+- Works with cached merkle roots
+
+## Network Architecture
+
+### Yggdrasil Integration
+- TPM-secured mesh networking
+- Cryptographic device addressing
+- Direct peer-to-peer identity verification
+- IPv6 addresses for all nodes
+
+## Database Role
+
+Databases used only for:
+- Initial merkle tree computation
+- Batch registration processing
+- Administrative operations
+
+Not required for:
+- Identity verification
+- Authentication
+- Certificate validation
+## Economic Defense
+
+Using the formula of ```2^(n + y)``` where ```n```is the number 
+of attempts and ```y``` is the number of domains with .001 emc
+is the base price fee (added on top of network fees) that is paid
+directly to the domain owner for rate limited actions. 
+The same formula is applied to a blockchain hosted spam list
+by yggdrasil public key of users. 
+
+## Group Membership
+
+Blockchain registry for group management:
+```
+registry:domain.coin:groupID = {
+  "members": ["alice_IDstable", "bob_IDstable"],
+  "merkle_root": "0xdef456...",
+  "updated": 1234567890
+}
+```
+
+## Speculative Features
+
+### Hardware Anti-Theft
+- Device requires specific identity to boot
+- TPM + YubiKey binding for unlock
+- BIOS/UEFI integration potential
+
+### LoRaWAN Integration
+- Offline mesh networking
+- Disaster-resilient communication
+- Identity verification over radio
+
+### Machine Identity
+- Yggdrasil public key as machine identity
+- Cross-system authentication via mesh
+- Service-to-service authentication
