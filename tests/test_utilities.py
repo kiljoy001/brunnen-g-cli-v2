@@ -142,7 +142,7 @@ def merkle_tree_data_strategy(draw):
     dih = draw(generate_32_bytes())
 
     # Sign the DIH with Dilithium
-    signature = sign(dih, keypair['secret_key'])
+    signature = sign(keypair['secret_key'], dih)
 
     return {
         'dih': dih,

@@ -18,6 +18,7 @@ ipfshttpclient = "*"
 faker = "*"
 pymerkle = "*"
 asyncpg = "*"
+cffi = "*"
 
 [dev-packages]
 

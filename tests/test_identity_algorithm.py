@@ -47,8 +47,8 @@ class TestIdentityAlgorithm:
        # Act
        id_stable, dih = await identity.compute_identity(
            tpm_public_key,
-           yubikey_public_key,
            dilithium_sig,
+           yubikey_public_key
         )
        assert isinstance(id_stable, bytes)
        assert len(id_stable) == 32
@@ -144,7 +144,7 @@ class TestIdentityAlgorithm:
 
         # Verify the Dilithium signature is valid
         try:
-            verify(data['dilithium_signature'], data['dih'], data['dilithium_public_key'])
+            verify(data['dilithium_public_key'], data['dih'], data['dilithium_signature'])
             signature_valid = True
         except:
             signature_valid = False
@@ -167,27 +167,28 @@ class TestIdentityAlgorithm:
 
     @pytest.mark.asyncio
     @given(
-        dih=generate_32_bytes(),
-        merkle_proof=merkle_proof_strategy(),
-        merkle_index=st.integers(min_value=0, max_value=2 ** 32 - 1)
+        tpm_pubkey=generate_32_bytes().filter(lambda x: x != bytes(32)),
     )
-    async def test_dilithium_signature_tamper_detection(self, dih, merkle_proof, merkle_index):
+    async def test_dilithium_signature_tamper_detection(self, tpm_pubkey):
         """Test that tampered Dilithium signatures are detected"""
         # Generate real keypair and sign
         public_key, secret_key = generate_keypair()
-        valid_signature = sign(dih, secret_key)
-
+        tpm_public_key = tpm_pubkey
+        valid_signature = sign(secret_key, tpm_public_key)
+        print(f"public key length: {len(public_key)}")
+        print(f"Expected length: {1952}")
+        print(f"Key starts with: {public_key[:10].hex()}")
+        print(f"Key ends with: {public_key[-10:].hex()}")
         # Verify original signature works
-        verify(valid_signature, dih, public_key)  # Should not raise
+        verify(public_key, tpm_public_key, valid_signature )  # Should not raise
 
         # Tamper with signature
         tampered_sig = bytearray(valid_signature)
         tampered_sig[0] ^= 0xFF  # Flip bits in first byte
-        tampered_sig = bytes(tampered_sig)
 
         # Verify tampered signature fails
         with pytest.raises(Exception):  # pqcrypto raises generic Exception
-            verify(tampered_sig, dih, public_key)
+            verify(bytes(tampered_sig), tpm_public_key, public_key)
 
     @pytest.mark.asyncio
     @given(
