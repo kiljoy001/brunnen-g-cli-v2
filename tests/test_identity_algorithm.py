@@ -6,10 +6,37 @@ from .test_utilities import (generate_32_bytes, generate_ecc_strategy, generate_
 from src.identity_algorithim import IdentityAlgorithm
 from pqcrypto.sign.ml_dsa_65 import generate_keypair, sign, verify
 from unittest.mock import patch
-
+from merkletools import MerkleTools
 
 
 class TestIdentityAlgorithm:
+
+    def create_merkle_tree_with_library(self, leaves: list[bytes]) -> tuple[bytes, list[list[tuple[str, bytes]]]]:
+        """Create merkle tree using merkletools library"""
+        if len(leaves) == 1:
+            return leaves[0], [[]]
+
+        mt = MerkleTools(hash_type='sha256')
+
+        for leaf in leaves:
+            mt.add_leaf(leaf.hex(), False)
+
+        mt.make_tree()
+        root = mt.get_merkle_root()
+
+        # Generate proofs WITH position information
+        proofs = []
+        for i in range(len(leaves)):
+            proof = mt.get_proof(i)
+            proof_with_positions = []
+            for p in proof:
+                if 'right' in p:
+                    proof_with_positions.append(('right', bytes.fromhex(p['right'])))
+                elif 'left' in p:
+                    proof_with_positions.append(('left', bytes.fromhex(p['left'])))
+            proofs.append(proof_with_positions)
+
+        return bytes.fromhex(root), proofs
 
     @pytest.mark.asyncio
     @given(
@@ -33,6 +60,7 @@ class TestIdentityAlgorithm:
         # Assert
         assert first_id_stable == second_id_stable
         assert first_dih == second_dih
+
     @given(
         tpm_public_key=generate_ecc_strategy()[0],
         dilithium_sig=generate_dilithium_hashes(),
@@ -118,13 +146,12 @@ class TestIdentityAlgorithm:
                 f"YubiKey change should affect stable hash (orig: {yubi_signature.hex()[:10]}..., mod: {modified_yubi.hex()[:10]}...)"
             # Note: DIH should NOT change for YubiKey modifications based on your algorithm
 
-
     @pytest.mark.asyncio
     @given(
-        tpm_public_key=generate_ecc_strategy()[0],  # Your ECC pubkey strategy
-        dilithium_sig_on_emercoin_hash=generate_dilithium_hashes(),  # Your Dilithium 'hash' strategy
+        tpm_public_key=generate_ecc_strategy()[0],
+        dilithium_sig_on_emercoin_hash=generate_dilithium_hashes(),
         yubikey_public_key=generate_ecc_strategy()[0],
-        alt_yubikey=generate_ecc_strategy()[1]# Your ECC signature strategy for YubiKey sig
+        alt_yubikey=generate_ecc_strategy()[1]
     )
     async def test_dih_independence_from_yubikey(self, tpm_public_key, dilithium_sig_on_emercoin_hash, yubikey_public_key, alt_yubikey):
         """Tests that DIF is independent of Yubikey public key"""
@@ -134,100 +161,253 @@ class TestIdentityAlgorithm:
         _, dih2 = await identity_object.compute_identity(tpm_public_key, dilithium_sig_on_emercoin_hash, alt_yubikey)
         assert dih1 == dih2
 
-        # verify_identity tests
-
     @pytest.mark.asyncio
-    @given(data=merkle_tree_data_strategy())
-    async def test_verify_identity_with_real_dilithium_signature(self, data):
-        """Test verify_identity with real Dilithium signature verification"""
+    async def test_verify_identity_with_valid_signature_and_proof(self):
+        """Verification succeeds with valid signature and merkle proof"""
         identity_algo = IdentityAlgorithm()
 
-        # Verify the Dilithium signature is valid
-        try:
-            verify(data['dilithium_public_key'], data['dih'], data['dilithium_signature'])
-            signature_valid = True
-        except:
-            signature_valid = False
+        # Create test data
+        tpm_pubkey = hashlib.sha256(b"tpm").digest()
+        dilithium_sig = hashlib.sha256(b"dilithium").digest()
+        yubikey_pubkey = hashlib.sha256(b"yubikey").digest()
+        id_stable, dih = await identity_algo.compute_identity(tpm_pubkey, dilithium_sig, yubikey_pubkey)
 
-        assert signature_valid, "Dilithium signature should be valid"
+        # Build merkle tree with id_stable as leaves
+        leaves = [hashlib.sha256(f"leaf_{i}".encode()).digest() for i in range(8)]
+        leaves[3] = id_stable
 
-        # Now test verify_identity with this valid signature
-        with patch.object(identity_algo, 'verify_identity') as mock_verify:
-            # Mock should verify the dilithium signature internally
-            mock_verify.return_value = signature_valid
+        root, all_proofs = self.create_merkle_tree_with_library(leaves)
+        merkle_index = 3
+        proof = all_proofs[merkle_index]
 
-            result = await identity_algo.verify_identity(
-                dih=data['dih'],
-                merkle_proof=data['merkle_proof'],
-                merkle_index=data['merkle_index'],
-                dilithium_domain_signature=data['dilithium_signature']
-            )
-
-            assert result == True
-
-    @pytest.mark.asyncio
-    @given(
-        tpm_pubkey=generate_32_bytes().filter(lambda x: x != bytes(32)),
-    )
-    async def test_dilithium_signature_tamper_detection(self, tpm_pubkey):
-        """Test that tampered Dilithium signatures are detected"""
-        # Generate real keypair and sign
+        # Generate valid signature on DIH
         public_key, secret_key = generate_keypair()
-        tpm_public_key = tpm_pubkey
-        valid_signature = sign(secret_key, tpm_public_key)
-        print(f"public key length: {len(public_key)}")
-        print(f"Expected length: {1952}")
-        print(f"Key starts with: {public_key[:10].hex()}")
-        print(f"Key ends with: {public_key[-10:].hex()}")
-        # Verify original signature works
-        verify(public_key, tpm_public_key, valid_signature )  # Should not raise
+        signature = sign(secret_key, dih)
 
-        # Tamper with signature
-        tampered_sig = bytearray(valid_signature)
-        tampered_sig[0] ^= 0xFF  # Flip bits in first byte
+        result = await identity_algo.verify_identity(
+            id_stable=id_stable,
+            dih=dih,
+            merkle_proof=proof,
+            merkle_index=merkle_index,
+            dilithium_domain_signature=signature,
+            dilithium_public_key=public_key,
+            merkle_root=root
+        )
 
-        # Verify tampered signature fails
-        with pytest.raises(Exception):  # pqcrypto raises generic Exception
-            verify(bytes(tampered_sig), tpm_public_key, public_key)
+        assert result is True
 
     @pytest.mark.asyncio
-    @given(
-        valid_data=merkle_tree_data_strategy(),
-        corrupted_proof_index=st.integers(min_value=0)
-    )
-    async def test_verify_identity_invalid_proof(self, valid_data, corrupted_proof_index):
-        """Test verification fails with corrupted merkle proof"""
+    async def test_verify_identity_fails_with_wrong_signature(self):
+        """Verification fails when signature is for wrong data"""
         identity_algo = IdentityAlgorithm()
-        assume(len(valid_data['merkle_proof']) > 0)
 
-        # Corrupt one node in the proof
-        proof_index = corrupted_proof_index % len(valid_data['merkle_proof'])
-        corrupted_proof = valid_data['merkle_proof'].copy()
-        corrupted_proof[proof_index] = bytes(32)  # All zeros
+        tpm_pubkey = hashlib.sha256(b"tpm").digest()
+        dilithium_sig = hashlib.sha256(b"dilithium").digest()
+        yubikey_pubkey = hashlib.sha256(b"yubikey").digest()
+        id_stable, dih = await identity_algo.compute_identity(tpm_pubkey, dilithium_sig, yubikey_pubkey)
 
-        with patch.object(identity_algo, 'verify_identity', return_value=False) as mock_verify:
-            result = await identity_algo.verify_identity(
-                dih=valid_data['dih'],
-                merkle_proof=corrupted_proof,
-                merkle_index=valid_data['merkle_index'],
-                dilithium_domain_signature=valid_data['dilithium_signature']
-            )
+        leaves = [hashlib.sha256(f"leaf_{i}".encode()).digest() for i in range(4)]
+        leaves[1] = id_stable
 
-            assert mock_verify.called
+        root, all_proofs = self.create_merkle_tree_with_library(leaves)
+        proof = all_proofs[1]
+
+        # Sign different data
+        public_key, secret_key = generate_keypair()
+        wrong_data = hashlib.sha256(b"wrong_data").digest()
+        signature = sign(secret_key, wrong_data)
+
+        result = await identity_algo.verify_identity(
+            id_stable=id_stable,
+            dih=dih,
+            merkle_proof=proof,
+            merkle_index=1,
+            dilithium_domain_signature=signature,
+            dilithium_public_key=public_key,
+            merkle_root=root
+        )
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_verify_identity_fails_with_wrong_merkle_root(self):
+        """Verification fails when merkle root doesn't match computed root"""
+        identity_algo = IdentityAlgorithm()
+
+        tpm_pubkey = hashlib.sha256(b"tpm").digest()
+        dilithium_sig = hashlib.sha256(b"dilithium").digest()
+        yubikey_pubkey = hashlib.sha256(b"yubikey").digest()
+        id_stable, dih = await identity_algo.compute_identity(tpm_pubkey, dilithium_sig, yubikey_pubkey)
+
+        leaves = [id_stable, hashlib.sha256(b"leaf_1").digest(), hashlib.sha256(b"leaf_2").digest()]
+
+        root, all_proofs = self.create_merkle_tree_with_library(leaves)
+        proof = all_proofs[0]
+
+        # Valid signature
+        public_key, secret_key = generate_keypair()
+        signature = sign(secret_key, dih)
+
+        # Wrong merkle root
+        wrong_root = hashlib.sha256(b"wrong_root").digest()
+
+        result = await identity_algo.verify_identity(
+            id_stable=id_stable,
+            dih=dih,
+            merkle_proof=proof,
+            merkle_index=0,
+            dilithium_domain_signature=signature,
+            dilithium_public_key=public_key,
+            merkle_root=wrong_root
+        )
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_verify_identity_with_single_leaf_tree(self):
+        """Verification succeeds with single-leaf tree (empty proof)"""
+        identity_algo = IdentityAlgorithm()
+
+        tpm_pubkey = hashlib.sha256(b"tpm").digest()
+        dilithium_sig = hashlib.sha256(b"dilithium").digest()
+        yubikey_pubkey = hashlib.sha256(b"yubikey").digest()
+        id_stable, dih = await identity_algo.compute_identity(tpm_pubkey, dilithium_sig, yubikey_pubkey)
+
+        # Single leaf tree - root IS the leaf
+        root, all_proofs = self.create_merkle_tree_with_library([id_stable])
+        proof = all_proofs[0]  # Should be empty list
+
+        # Valid signature
+        public_key, secret_key = generate_keypair()
+        signature = sign(secret_key, dih)
+
+        result = await identity_algo.verify_identity(
+            id_stable=id_stable,
+            dih=dih,
+            merkle_proof=proof,
+            merkle_index=0,
+            dilithium_domain_signature=signature,
+            dilithium_public_key=public_key,
+            merkle_root=root
+        )
+
+        assert result is True
+        assert proof == []  # Verify empty proof
 
     @pytest.mark.asyncio
     @given(
-        dih=generate_32_bytes(),
-        merkle_index=st.integers(min_value=0, max_value=15)
+        tpm_pubkey=generate_32_bytes(),
+        dilithium_sig=generate_32_bytes(),
+        yubikey_pubkey=generate_32_bytes(),
+        tree_size=st.integers(min_value=2, max_value=32),
+        leaf_index=st.integers(min_value=0, max_value=31)
     )
-    async def test_merkle_proof_length_matches_tree_height(self, dih, merkle_index):
-        """Test merkle proof length corresponds to tree structure"""
-        # For a binary tree, proof length should be log2(total_leaves)
-        # Assuming max 2^16 leaves, proof length should be <= 16
-        tree_height = merkle_index.bit_length() if merkle_index > 0 else 1
-        proof_length = min(tree_height + 1, 16)  # Reasonable upper bound
+    async def test_verify_identity_with_random_tree_sizes(self, tpm_pubkey, dilithium_sig, yubikey_pubkey, tree_size, leaf_index):
+        """Test verify_identity with various tree sizes and positions"""
+        identity_algo = IdentityAlgorithm()
+        leaf_index = leaf_index % tree_size
+        id_stable, dih = await identity_algo.compute_identity(tpm_pubkey, dilithium_sig, yubikey_pubkey)
 
-        merkle_proof = [hashlib.sha256(f"node_{i}".encode()).digest() for i in range(proof_length)]
+        # Build tree with id_stable at random position
+        leaves = [hashlib.sha256(f"leaf_{i}".encode()).digest() for i in range(tree_size)]
+        leaves[leaf_index] = id_stable
 
-        assert len(merkle_proof) <= 16
-        assert all(len(node) == 32 for node in merkle_proof)
+        root, all_proofs = self.create_merkle_tree_with_library(leaves)
+        proof = all_proofs[leaf_index]
+
+        # Valid signature
+        public_key, secret_key = generate_keypair()
+        signature = sign(secret_key, dih)
+
+        result = await identity_algo.verify_identity(
+            id_stable=id_stable,
+            dih=dih,
+            merkle_proof=proof,
+            merkle_index=leaf_index,
+            dilithium_domain_signature=signature,
+            dilithium_public_key=public_key,
+            merkle_root=root
+        )
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    @given(
+        tpm_pubkey=generate_32_bytes(),
+        dilithium_sig=generate_32_bytes(),
+        yubikey_pubkey=generate_32_bytes(),
+        proof_corruption=st.data()
+    )
+    async def test_verify_identity_corrupted_proof_always_fails(self, tpm_pubkey, dilithium_sig, yubikey_pubkey, proof_corruption):
+        """Any corruption in merkle proof should fail verification"""
+        identity_algo = IdentityAlgorithm()
+        id_stable, dih = await identity_algo.compute_identity(tpm_pubkey, dilithium_sig, yubikey_pubkey)
+
+        # Create valid tree
+        leaves = [hashlib.sha256(f"leaf_{i}".encode()).digest() for i in range(8)]
+        leaves[3] = id_stable
+        root, all_proofs = self.create_merkle_tree_with_library(leaves)
+        proof = all_proofs[3].copy()
+
+        # Corrupt proof if it exists
+        if proof:
+            corrupt_idx = proof_corruption.draw(st.integers(0, len(proof)-1))
+            corrupt_byte = proof_corruption.draw(st.integers(0, 31))
+            corrupt_bit = proof_corruption.draw(st.integers(1, 255))
+
+            position, hash_bytes = proof[corrupt_idx]
+            corrupted = bytearray(hash_bytes)
+            corrupted[corrupt_byte] ^= corrupt_bit
+            proof[corrupt_idx] = (position, bytes(corrupted))
+
+        # Valid signature
+        public_key, secret_key = generate_keypair()
+        signature = sign(secret_key, dih)
+
+        result = await identity_algo.verify_identity(
+            id_stable=id_stable,
+            dih=dih,
+            merkle_proof=proof,
+            merkle_index=3,
+            dilithium_domain_signature=signature,
+            dilithium_public_key=public_key,
+            merkle_root=root
+        )
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_verify_identity_tree_size_3_debug(self):
+        """Debug failing case with 3-leaf tree"""
+        identity_algo = IdentityAlgorithm()
+        tpm_pubkey = hashlib.sha256(b"tpm").digest()
+        dilithium_sig = hashlib.sha256(b"dilithium").digest()
+        yubikey_pubkey = hashlib.sha256(b"yubikey").digest()
+        id_stable, dih = await identity_algo.compute_identity(tpm_pubkey, dilithium_sig, yubikey_pubkey)
+
+        leaves = [hashlib.sha256(f"leaf_{i}".encode()).digest() for i in range(3)]
+        leaves[2] = id_stable
+
+        root, all_proofs = self.create_merkle_tree_with_library(leaves)
+        proof = all_proofs[2]
+
+        print(f"Tree size: 3, ID_STABLE at index: 2")
+        print(f"Root: {root.hex()[:16]}...")
+        print(f"Proof length: {len(proof)}")
+        for i, (position, hash_bytes) in enumerate(proof):
+            print(f"  Proof[{i}]: {position} - {hash_bytes.hex()[:16]}...")
+
+        public_key, secret_key = generate_keypair()
+        signature = sign(secret_key, dih)
+
+        result = await identity_algo.verify_identity(
+            id_stable=id_stable,
+            dih=dih,
+            merkle_proof=proof,
+            merkle_index=2,
+            dilithium_domain_signature=signature,
+            dilithium_public_key=public_key,
+            merkle_root=root
+        )
+
+        assert result is True

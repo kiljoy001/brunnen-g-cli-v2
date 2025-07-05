@@ -234,3 +234,46 @@ registry:domain.coin:groupID = {
 - Yggdrasil public key as machine identity
 - Cross-system authentication via mesh
 - Service-to-service authentication
+
+## API Write Authentication
+
+### YubiKey Touch Authorization
+Write operations require physical user presence through YubiKey touch authentication:
+
+1. **Challenge Generation**: User touches YubiKey to sign current block height + expiry window
+2. **Signature Creation**: YubiKey generates signature proving identity and consent  
+3. **Write Request**: Applications include signature with all write operations
+4. **Verification**: Node verifies signature against user's stored YubiKey public key
+5. **Expiration**: Signatures expire after configurable block count (default: 10 blocks)
+
+### Security Properties
+- **Physical Presence**: Prevents remote account takeover
+- **Time-Limited**: Signatures expire automatically via block height
+- **Non-Repudiation**: Cryptographic proof of user authorization
+- **Hardware-Bound**: Cannot be replicated without physical YubiKey
+
+## Economic Write Control
+
+### Fee Structure
+Node operators implement configurable per-write fees to prevent spam and generate revenue:
+
+- **Base Fee**: Minimum charge per write operation (set by node operator)
+- **Dynamic Pricing**: Fees increase with write frequency using spam prevention equation
+- **Payment Methods**: EMC, Bitcoin, or other cryptocurrencies
+- **Automatic Transfer**: Fees flow directly to domain owner's wallet
+
+### Spam Prevention Equation
+```
+final_fee = base_fee * 2^(n + y)
+```
+
+Where:
+- `base_fee`: Node operator's minimum charge
+- `n`: Domain-specific scaling factor
+- `y`: Number of write attempts in current window
+
+### Economic Benefits
+- **Revenue Stream**: Domain owners profit from user activity
+- **Natural Rate Limiting**: High-frequency abuse becomes expensive
+- **Quality Control**: Economic barriers filter legitimate vs. spam traffic
+- **Sustainable Model**: Self-funding infrastructure without ads or surveillance
