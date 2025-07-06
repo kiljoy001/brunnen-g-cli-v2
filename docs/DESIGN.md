@@ -218,62 +218,245 @@ registry:domain.coin:groupID = {
 }
 ```
 
-## Speculative Features
+# API Write Operations and Economic Model
 
-### Hardware Anti-Theft
-- Device requires specific identity to boot
-- TPM + YubiKey binding for unlock
-- BIOS/UEFI integration potential
+## Write Authentication
 
-### LoRaWAN Integration
-- Offline mesh networking
-- Disaster-resilient communication
-- Identity verification over radio
+All write operations require YubiKey touch authentication to ensure physical user presence:
 
-### Machine Identity
-- Yggdrasil public key as machine identity
-- Cross-system authentication via mesh
-- Service-to-service authentication
+1. **Touch Authorization**: User touches YubiKey to sign `H(current_block_height || expiry_window || operation_type)`
+2. **Request Submission**: Application includes signature with write request
+3. **Verification**: Node validates signature against user's registered YubiKey public key
+4. **Expiration**: Signatures expire after 10 blocks (~10 minutes)
 
-## API Write Authentication
-
-### YubiKey Touch Authorization
-Write operations require physical user presence through YubiKey touch authentication:
-
-1. **Challenge Generation**: User touches YubiKey to sign current block height + expiry window
-2. **Signature Creation**: YubiKey generates signature proving identity and consent  
-3. **Write Request**: Applications include signature with all write operations
-4. **Verification**: Node verifies signature against user's stored YubiKey public key
-5. **Expiration**: Signatures expire after configurable block count (default: 10 blocks)
-
-### Security Properties
-- **Physical Presence**: Prevents remote account takeover
-- **Time-Limited**: Signatures expire automatically via block height
-- **Non-Repudiation**: Cryptographic proof of user authorization
-- **Hardware-Bound**: Cannot be replicated without physical YubiKey
-
-## Economic Write Control
+## Economic Model
 
 ### Fee Structure
-Node operators implement configurable per-write fees to prevent spam and generate revenue:
 
-- **Base Fee**: Minimum charge per write operation (set by node operator)
-- **Dynamic Pricing**: Fees increase with write frequency using spam prevention equation
-- **Payment Methods**: EMC, Bitcoin, or other cryptocurrencies
-- **Automatic Transfer**: Fees flow directly to domain owner's wallet
+Write operations incur fees to prevent spam and fund infrastructure:
 
-### Spam Prevention Equation
 ```
-final_fee = base_fee * 2^(n + y)
+total_fee = (base_fee + (data_size_kb * storage_rate)) * 2^(attempts_in_window)
 ```
 
-Where:
-- `base_fee`: Node operator's minimum charge
-- `n`: Domain-specific scaling factor
-- `y`: Number of write attempts in current window
+**Components:**
+- `base_fee`: 0.001 EMC minimum per operation
+- `storage_rate`: 0.0001 EMC per KB
+- `attempts_in_window`: Requests in last 24 hours
+- **Platform fee**: 1% to Brunnen-G development
 
-### Economic Benefits
-- **Revenue Stream**: Domain owners profit from user activity
-- **Natural Rate Limiting**: High-frequency abuse becomes expensive
-- **Quality Control**: Economic barriers filter legitimate vs. spam traffic
-- **Sustainable Model**: Self-funding infrastructure without ads or surveillance
+**Fee Distribution:**
+- 99% to domain owner
+- 1% to platform development fund
+
+### Storage Tiers
+- **Metadata** (<1KB): Base fee only
+- **Documents** (1KB-1MB): Linear scaling
+- **Large Objects** (>1MB): Premium rates apply
+
+# Additional Speculative Features
+
+## User-Level DNS
+
+Each identity controls a DNS namespace:
+
+```sql
+CREATE TABLE user_dns (
+  identity_address VARCHAR(255),
+  record_type ENUM('AAAA', 'CNAME', 'MX', 'SRV', 'HYPER', 'IPFS', 'BTIH'),
+  subdomain VARCHAR(255),
+  value TEXT,
+  priority INTEGER,
+  ttl INTEGER DEFAULT 3600,
+  UNIQUE(identity_address, subdomain, record_type)
+);
+```
+
+**Example Records:**
+```
+alice@domain.coin           AAAA   200:dead:beef::1
+blog.alice@domain.coin      AAAA   200:cafe:babe::2
+mail.alice@domain.coin      MX     10 alice@mailserver.coin
+data.alice@domain.coin      HYPER  hyper://abc123...
+files.alice@domain.coin     IPFS   ipfs://QmXyz789...
+media.alice@domain.coin     BTIH   magnet:?xt=urn:btih:def456...
+```
+
+**Resolution API:** `GET /dns/{identity}/{subdomain}`
+
+### P2P Protocol Integration
+
+Support the same data layer as Agregore Browser:
+
+**HYPER Records** - Hypercore Protocol feeds
+- Real-time data streams
+- Cryptographically signed append-only logs
+- Automatic peer replication
+
+**IPFS Records** - InterPlanetary File System
+- Content-addressed static files
+- Automatic deduplication
+- Global CDN through peers
+
+**BTIH Records** - BitTorrent Info Hash
+- Large file distribution
+- Proven P2P technology
+- Bandwidth sharing across peers
+
+This creates complete compatibility with Agregore while maintaining identity-based addressing.
+
+## Secure Object Storage
+
+PostgreSQL-native storage with identity-based access:
+
+```sql
+CREATE SCHEMA user_{identity_hash} AUTHORIZATION brunnen_node;
+
+CREATE TABLE user_{identity_hash}.objects (
+  id UUID DEFAULT gen_random_uuid(),
+  key VARCHAR(255) UNIQUE,
+  value JSONB,
+  metadata JSONB,
+  encrypted BOOLEAN DEFAULT false,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
+  PRIMARY KEY (id)
+);
+
+-- Enable JSON indexing
+CREATE INDEX idx_value_gin ON user_{identity_hash}.objects USING GIN (value);
+```
+
+**Features:**
+- JSONB for flexible data structures
+- Optional client-side encryption
+- SQL-queryable user data
+- Automatic schema isolation
+
+## WASM Compute Layer
+
+Execute user functions on their data:
+
+```sql
+CREATE TABLE wasm_functions (
+  identity_address VARCHAR(255),
+  function_name VARCHAR(255),
+  wasm_hash VARCHAR(64),
+  entry_point VARCHAR(255),
+  permissions JSONB,
+  UNIQUE(identity_address, function_name)
+);
+```
+
+**DNS Integration:**
+```
+compute.alice@domain.coin   TXT   "wasm://QmHashOfWASMBinary"
+api.alice@domain.coin       SRV   0 0 8080 200:dead:beef::1
+```
+
+**Execution Model:**
+- Functions run in sandboxed WASM runtime
+- Access only to user's own schema
+- Results cached with configurable TTL
+- Billed per CPU millisecond
+
+## Identity Sharding
+
+High-security identities split across multiple TPMs:
+
+- K-of-N reconstruction required
+- Geographic distribution of shards
+- Time-locked recovery procedures
+- Hardware attestation for each shard
+
+## Zero-Knowledge Attributes
+
+Prove attributes without revealing identity:
+
+- Age verification without birthdate
+- Credential validation without details
+- Group membership proofs
+- Selective disclosure certificates
+
+## Agregore Browser Integration
+
+Native browser for the decentralized web:
+
+- **Direct Protocol Support**: Browse `hyper://`, `ipfs://`, and `bittorrent://` addresses natively
+- **Identity Integration**: YubiKey authentication built into browser
+- **P2P First**: Automatically reshare visited content with peers
+- **Offline Capable**: Access cached and peer-shared content without internet
+- **DNS Bridge**: Resolve `alice@domain.coin` to Hypercore addresses via API
+
+**User Experience:**
+```
+// Navigate directly to identity-based content
+https://api.domain.coin/dns/alice -> returns HYPER record
+hyper://[alice's blog feed] -> loads in Agregore
+```
+
+Agregore becomes the default browser for Brunnen-G users, accessing P2P content directly via DNS lookups.
+
+## Keycloak Integration
+
+Enterprise SSO bridge:
+
+- **SAML/OIDC Provider**: Brunnen-G identities exposed via standard protocols
+- **Hardware Authentication**: YubiKey touch replaces passwords in enterprise
+- **Group Sync**: Blockchain groups map to Keycloak roles
+- **Audit Trail**: All authentications logged with TPM signatures
+
+Organizations can adopt Brunnen-G while maintaining existing SSO infrastructure.
+
+## PAM Module
+
+System-level authentication:
+
+- **Login Integration**: Replace passwords for SSH, sudo, desktop login
+- **Offline Mode**: Cache identity proofs for network-free auth
+- **Touch Verification**: YubiKey required for privileged operations
+- **Group Support**: Map blockchain groups to Unix groups
+
+## Asterisk VoIP
+
+Identity-based telephony:
+
+- **Dial by Identity**: Call alice@domain.coin directly
+- **SIP over Yggdrasil**: Encrypted mesh routing
+- **Economic Defense**: Spam calls cost EMC
+- **AGI Integration**: brunnen_lookup.agi resolves identities to endpoints
+
+## JavaScript SDK
+
+Web integration library:
+
+```javascript
+// Simple authentication
+const identity = await BrunnenG.authenticate({
+  touch: true,  // Require YubiKey touch
+  challenge: await BrunnenG.getChallenge()
+});
+
+// DNS lookups
+const address = await BrunnenG.resolve('alice@domain.coin');
+
+// Signed API calls
+const response = await BrunnenG.api.post('/data', {
+  body: { key: 'value' },
+  identity: identity
+});
+```
+
+Makes identity integration trivial for web developers.
+
+## P256-Based Group Membership
+
+Cryptographic group boundaries using elliptic curves:
+
+- **Group Creation**: Domain admin generates P256 group key sealed in TPM
+- **Member Addition**: Derive member key from `H(identity || group_seed)`
+- **Proof of Membership**: Member's P256 public key signed by group key
+- **Revocation**: Remove member's point from group aggregate
+- **Network Segmentation**: Automatic Yggdrasil peer filtering by group
+
+**Optional Privacy Enhancement**: Ring signatures for anonymous group membership - prove you're in the group without revealing which member.
