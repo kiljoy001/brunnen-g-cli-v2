@@ -38,36 +38,27 @@ class IdentityAlgorithm:
     @staticmethod
     async def verify_identity(id_stable: bytes, dih: bytes, merkle_proof: list[tuple[str, bytes]], 
                              merkle_index: int, dilithium_domain_signature: bytes, 
-                             dilithium_public_key: bytes, merkle_root: bytes) -> bool:
+                             dilithium_public_key: bytes, merkle_root: bytes,
+                             yubikey_public_key: bytes, challenge: bytes, 
+                             yubikey_signature: bytes) -> bool:
         """
-        Verify identity using merkle proof and dilithium signature
+        Verify identity using merkle proof, dilithium signature, and yubikey challenge
+        """
+        # Step 1: Verify YubiKey owns this identity (liveness check)
+        challenge_response = hashlib.sha256(id_stable + challenge).digest()
+        if not yubikey_verify(yubikey_public_key, challenge_response, yubikey_signature):
+            return False
         
-        Args:
-            id_stable: Stable Identity Hash (merkle leaf)
-            dih: Domain Identity Hash (for signature verification)
-            merkle_proof: List of (position, sibling_hash) tuples
-            merkle_index: Leaf index in merkle tree
-            dilithium_domain_signature: Dilithium signature of the DIH
-            dilithium_public_key: Public key to verify signature
-            merkle_root: Expected merkle root
-            
-        Returns:
-            True if both signature and merkle proof are valid
-        """
-        # Step 1: Verify Dilithium signature on DIH
+        # Step 2: Verify Dilithium signature on DIH
         if not verify(dilithium_public_key, dih, dilithium_domain_signature):
             return False
         
-        # Step 2: Verify merkle proof using id_stable as leaf
+        # Step 3: Verify merkle proof using id_stable as leaf
         current_hash = id_stable
-
         for position, sibling_hash in merkle_proof:
             if position == 'left':
-                # Sibling is on left
                 current_hash = hashlib.sha256(sibling_hash + current_hash).digest()
-            else:  # position == 'right'
-                # Sibling is on right
+            else:
                 current_hash = hashlib.sha256(current_hash + sibling_hash).digest()
         
-        # Check if computed root matches expected root
         return current_hash == merkle_root

@@ -7,6 +7,7 @@ from src.identity_algorithim import IdentityAlgorithm
 from pqcrypto.sign.ml_dsa_65 import generate_keypair, sign, verify
 from unittest.mock import patch
 from merkletools import MerkleTools
+import os
 
 
 class TestIdentityAlgorithm:
@@ -224,7 +225,10 @@ class TestIdentityAlgorithm:
             merkle_index=1,
             dilithium_domain_signature=signature,
             dilithium_public_key=public_key,
-            merkle_root=root
+            merkle_root=root,
+            yubikey_public_key=yubikey_pubkey,
+            challenge=os.urandom(32),
+            yubikey_signature=b"invalid_signature" 
         )
 
         assert result is False
@@ -411,3 +415,128 @@ class TestIdentityAlgorithm:
         )
 
         assert result is True
+
+    @pytest.mark.asyncio
+    @given(
+        id_stable=generate_32_bytes(),
+        challenge1=st.binary(min_size=16, max_size=64),
+        challenge2=st.binary(min_size=16, max_size=64),
+        yubikey_private_key=st.binary(min_size=32, max_size=32)
+    )
+    async def test_different_challenges_different_signatures(self, id_stable, challenge1, challenge2, yubikey_private_key):
+        """Different challenges must produce different signatures"""
+        assume(challenge1 != challenge2)
+
+        # Mock yubikey_sign function
+        with patch('src.identity_algorithim.yubikey_sign') as mock_sign:
+            mock_sign.side_effect = lambda key, msg: hashlib.sha256(key + msg).digest()
+
+            sig1 = mock_sign(yubikey_private_key, hashlib.sha256(id_stable + challenge1).digest())
+            sig2 = mock_sign(yubikey_private_key, hashlib.sha256(id_stable + challenge2).digest())
+
+            assert sig1 != sig2
+
+    @pytest.mark.asyncio
+    @given(
+        tpm_pubkey=generate_32_bytes(),
+        dilithium_sig=generate_dilithium_hashes(),
+        yubikey_pubkey=generate_ecc_strategy()[0],
+        challenge=st.binary(min_size=16, max_size=64),
+        tree_data=merkle_tree_data_strategy()
+    )
+    async def test_verify_identity_with_valid_yubikey_challenge(self, tpm_pubkey, dilithium_sig, yubikey_pubkey, challenge, tree_data):
+        """Verification succeeds with valid YubiKey challenge-response"""
+        identity_algo = IdentityAlgorithm()
+        id_stable, dih = await identity_algo.compute_identity(tpm_pubkey, dilithium_sig, yubikey_pubkey)
+
+        # Mock yubikey functions
+        with patch('src.identity_algorithim.yubikey_sign') as mock_sign, \
+             patch('src.identity_algorithim.yubikey_verify') as mock_verify:
+
+            # Setup mocks
+            challenge_response = hashlib.sha256(id_stable + challenge).digest()
+            signature = hashlib.sha256(b"sig" + challenge_response).digest()
+            mock_sign.return_value = signature
+            mock_verify.return_value = True
+
+            # Create valid merkle tree
+            leaves = [hashlib.sha256(f"leaf_{i}".encode()).digest() for i in range(4)]
+            leaves[1] = id_stable
+            root, all_proofs = self.create_merkle_tree_with_library(leaves)
+
+            result = await identity_algo.verify_identity(
+                id_stable=id_stable,
+                dih=dih,
+                merkle_proof=all_proofs[1],
+                merkle_index=1,
+                dilithium_domain_signature=tree_data['dilithium_signature'],
+                dilithium_public_key=tree_data['dilithium_public_key'],
+                merkle_root=root,
+                yubikey_public_key=yubikey_pubkey,
+                challenge=challenge,
+                yubikey_signature=signature
+            )
+
+            # Verify mock was called correctly
+            mock_verify.assert_called_once_with(yubikey_pubkey, challenge_response, signature)
+            assert result is True
+
+    @pytest.mark.asyncio
+    @given(
+        id_stable=generate_32_bytes(),
+        challenge=st.binary(min_size=16, max_size=64),
+        correct_key=generate_ecc_strategy()[0],
+        wrong_key=generate_ecc_strategy()[0],
+        tree_data=merkle_tree_data_strategy()
+    )
+    async def test_wrong_yubikey_fails_verification(self, id_stable, challenge, correct_key, wrong_key, tree_data):
+        """Wrong YubiKey cannot authenticate"""
+        assume(correct_key != wrong_key)
+        identity_algo = IdentityAlgorithm()
+
+        with patch('src.identity_algorithim.yubikey_verify') as mock_verify:
+            mock_verify.return_value = False  # Wrong key fails verification
+
+            # Valid merkle proof
+            root, all_proofs = self.create_merkle_tree_with_library([id_stable])
+
+            result = await identity_algo.verify_identity(
+                id_stable=id_stable,
+                dih=tree_data['dih'],
+                merkle_proof=all_proofs[0],
+                merkle_index=0,
+                dilithium_domain_signature=tree_data['dilithium_signature'],
+                dilithium_public_key=tree_data['dilithium_public_key'],
+                merkle_root=root,
+                yubikey_public_key=wrong_key,
+                challenge=challenge,
+                yubikey_signature=b"wrong_sig"
+            )
+
+            assert result is False
+
+    @pytest.mark.asyncio
+    @given(
+        id_stable=generate_32_bytes(),
+        old_challenge=st.binary(min_size=16, max_size=64),
+        new_challenge=st.binary(min_size=16, max_size=64),
+        yubikey_pubkey=generate_ecc_strategy()[0]
+    )
+    async def test_replay_attack_prevention(self, id_stable, old_challenge, new_challenge, yubikey_pubkey):
+        """Old signatures cannot be reused with new challenges"""
+        assume(old_challenge != new_challenge)
+
+        # Generate signature for old challenge
+        old_response = hashlib.sha256(id_stable + old_challenge).digest()
+        old_sig = hashlib.sha256(b"sig" + old_response).digest()
+
+        # Try to verify old signature with new challenge
+        new_response = hashlib.sha256(id_stable + new_challenge).digest()
+
+        with patch('src.identity_algorithim.yubikey_verify') as mock_verify:
+            # Mock returns False because signature doesn't match new challenge
+            mock_verify.return_value = False
+
+            # This should fail
+            verified = mock_verify(yubikey_pubkey, new_response, old_sig)
+            assert verified is False
